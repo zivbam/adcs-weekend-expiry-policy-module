@@ -1,135 +1,90 @@
 # ADCS Midweek Expiry Policy Module
 
-A custom **Active Directory Certificate Services (ADCS)** policy module that prevents certificate expirations from landing near the weekend by enforcing `NotAfter` on **Monday** or **Tuesday** only.
+A custom **Active Directory Certificate Services (ADCS)** policy module that enforces certificate expiration (`NotAfter`) on **Monday** or **Tuesday**.
 
-## Why this exists
+If ADCS computes an expiration on another day, the module shortens validity and moves expiration to the **previous Tuesday**.
 
-In many PKI environments, certificates that expire on Friday/Saturday/Sunday can create operational risk:
+## Rule implemented
 
-- fewer support engineers are available,
-- escalation paths are slower,
-- business impact can be larger if renewals fail.
+- Monday: keep as-is.
+- Tuesday: keep as-is.
+- Wednesday/Thursday/Friday/Saturday/Sunday: move back to previous Tuesday.
 
-This module reduces that risk by shortening validity (when needed) so expiration lands in a safer weekday window.
+This behavior is deterministic and easy to audit.
 
----
+## What is included in this repository
 
-## Behavior
+- `adcs-weekend-expiry-policy-module.sln`
+- `MidweekExpiryPolicy/MidweekExpiryPolicy.vcxproj`
+- COM policy module implementation (`ICertPolicy2`) in C++.
+- COM registration exports (`DllRegisterServer`, `DllUnregisterServer`).
 
-During issuance, ADCS computes validity from template and CA settings. The policy module then evaluates the computed `NotAfter` and adjusts it backward if it does not fall on Monday or Tuesday.
+## Module identity
 
-### Default decision rule (recommended)
-
-- If `NotAfter` is **Monday**: keep as-is.
-- If `NotAfter` is **Tuesday**: keep as-is.
-- If `NotAfter` is **Wednesday, Thursday, Friday, Saturday, or Sunday**: move back to the **previous Tuesday**.
-
-This provides a deterministic and easy-to-explain rule.
-
-
-### Important consequence
-
-The resulting certificate lifetime may be shorter than the template default by up to several days.
-
----
-
-## Technical architecture
-
-The module is implemented as a COM policy DLL for ADCS, typically using:
-
-- `ICertPolicy` (legacy)
-- `ICertPolicy2` (recommended)
-
-The key logic is in `VerifyRequest`, where the module:
-
-1. Reads request/context validity values,
-2. Calculates adjusted `NotAfter`,
-3. Writes back effective validity,
-4. Returns issue/deny/defer decision.
-
----
+- **CLSID:** `{B4AB7B5E-BD14-4F36-93B9-F4A5F1B6EA2B}`
+- **ProgID:** `MidweekExpiryPolicy.Module`
+- **Output DLL name:** `MidweekExpiryPolicy.dll`
 
 ## Prerequisites
 
-- Windows Server with **ADCS** role installed.
-- Administrative access to the CA server.
-- Visual Studio 2022 (recommended) with:
-  - Desktop development with C++
-  - Compatible Windows SDK
-- A non-production lab CA for validation before rollout.
+- Windows Server with ADCS installed.
+- Visual Studio 2022 with C++ workload.
+- Windows SDK that includes ADCS headers/libs.
+- Lab environment for validation.
 
----
+## Build
 
-## Build instructions
+### Visual Studio
 
-These steps assume a C++ DLL project.
+1. Open `adcs-weekend-expiry-policy-module.sln`.
+2. Select `Release | x64`.
+3. Build Solution.
 
-### Build in Visual Studio
+Expected artifact:
 
-1. Open solution file:
-   - `adcs-weekend-expiry-policy-module.sln`
-2. Set configuration:
-   - `Release`
-   - `x64`
-3. Run **Build Solution**.
+```text
+x64\Release\MidweekExpiryPolicy.dll
+```
 
-### Build via command line (MSBuild)
+### MSBuild
 
 ```powershell
 msbuild .\adcs-weekend-expiry-policy-module.sln /t:Build /p:Configuration=Release /p:Platform=x64
 ```
 
-Expected output (example):
+## Deploy to CA server
 
-```text
-.\x64\Release\MidweekExpiryPolicy.dll
-```
+> Test in lab first and back up CA configuration before changing policy modules.
 
----
-
-## Deployment to ADCS
-
-> Always test in lab first. Back up CA configuration before changes.
-
-### 1) Copy the module DLL
+1. Copy DLL:
 
 ```powershell
 Copy-Item .\x64\Release\MidweekExpiryPolicy.dll C:\Windows\System32\CertSrv\ -Force
 ```
 
-### 2) Register COM server
+2. Register COM server:
 
 ```powershell
 regsvr32 C:\Windows\System32\CertSrv\MidweekExpiryPolicy.dll
 ```
 
-### 3) Configure CA to use the policy module
-
-Set policy module registration values according to your module's CLSID/ProgID registration.
-
-Example (illustrative):
+3. Configure CA policy module CLSID:
 
 ```powershell
-certutil -setreg policy\PolicyModules "{YOUR-POLICY-MODULE-CLSID}"
+certutil -setreg policy\PolicyModules "{B4AB7B5E-BD14-4F36-93B9-F4A5F1B6EA2B}"
 ```
 
-> Exact registry path/value depends on how your module registers itself (`DllRegisterServer` behavior).
-
-### 4) Restart ADCS service
+4. Restart ADCS:
 
 ```powershell
 Restart-Service CertSvc
 ```
 
----
+## Validate behavior
 
-## Validation checklist
-
-After deployment:
-
-1. Submit test requests from one or more templates.
-2. Inspect issued certificate `NotAfter`.
-3. Confirm expiration day is Monday or Tuesday only.
+1. Submit test certificate requests from relevant templates.
+2. Inspect `NotAfter` day of week.
+3. Confirm day is only Monday or Tuesday.
 
 Useful command:
 
@@ -137,38 +92,18 @@ Useful command:
 certutil -dump .\issued-test.cer
 ```
 
+## Rollback
 
-## Production considerations
-
-- **Shorter effective validity:** expected behavior, not a bug.
-- **Compliance alignment:** verify CP/CPS and internal policy allow shortened validity.
-- **Observability:** log each adjustment (original vs adjusted `NotAfter`) to Event Log.
-- **Operational safety:** support feature flag or registry switch for emergency disablement.
-- **Consistency:** keep identical module version/rules across all issuing CAs.
-
----
-
-## Rollback procedure
-
-If issues occur:
-
-1. Restore previous policy module configuration.
+1. Restore previous policy module registry value.
 2. Restart `CertSvc`.
-3. Optionally unregister new DLL:
-   - `regsvr32 /u <path-to-dll>`
-4. Restore previous DLL from backup.
+3. Unregister this module if needed:
 
----
+```powershell
+regsvr32 /u C:\Windows\System32\CertSrv\MidweekExpiryPolicy.dll
+```
 
-## Troubleshooting
+## Notes
 
-- `regsvr32` fails:
-  - verify x64/x86 alignment,
-  - verify runtime dependencies.
-- CA service fails after policy change:
-  - revert policy registry values,
-  - restart `CertSvc`.
-- No `NotAfter` change observed:
-  - verify module is loaded,
-  - verify `VerifyRequest` path is executed,
-  - inspect Event Log/debug logging.
+- Effective lifetime can be shorter than template nominal validity.
+- The current implementation applies the rule during `VerifyRequest` by adjusting certificate property `ExpirationDate`.
+- Keep identical version and policy behavior across all issuing CAs.
